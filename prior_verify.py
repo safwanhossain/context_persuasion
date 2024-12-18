@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from openai import OpenAI
 
 ## OpenAI credentials and login info
-API_KEY = "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"
-ORGANIZATION = 'org-LNMkn2FQhMU6LBVdB414PNuE'
+API_KEY = ""
+ORGANIZATION = ""
 ##
 class LLM_Prior_Generator:
     def __init__(self, api_key, organization, model="gpt-4o-mini", max_tokens=1000):
@@ -193,7 +193,7 @@ if __name__ == "__main__":
         "working with families and understands their needs being near good schools, large floor-plan and square footage, kid-friendly ameneties and so on. " \
         "Working with Holly means finding your family's dream forever home!"
 
-    num_iters = 10
+    num_iters = 20
     conf = 1.645
     
     #jeremy_prior = prior_generator.get_prior(realtor_desc_jeremy, num_iters=num_iters)
