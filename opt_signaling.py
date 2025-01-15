@@ -1,7 +1,6 @@
-import gurobipy as gp
-from gurobipy import GRB
 import numpy as np
 import matplotlib.pyplot as plt
+import scipy
 
 class PersuasionSolver:
     """ Quantitative solver class for the state-independent contextual persuasion problem
@@ -23,14 +22,6 @@ class PersuasionSolver:
         return 0
 
     def _verify_constraints(self, signal_scheme):
-        #states = instance_dict["states"]
-        #actions = instance_dict["actions"]
-        #rec_utility, sender_utility = instance_dict["rec_utility"], instance_dict["sender_utility"]
-        #true_prior = instance_dict["true_prior"]
-
-        # all context priors should be the same here. So just take first
-        #context_prior = instance_dict["context_priors"][0]
-
         verified = True
         for i in range(self.actions):
             for j in range(self.actions):
@@ -68,7 +59,24 @@ class PersuasionSolver:
                 for state in range(self.states):
                     action_utility += self.context_prior[state] * signaling_scheme[state][signal] * self.rec_utility[state, action]
                 action_utilities.append(action_utility)
-            signal_to_opt_action[signal] = np.argmax(action_utilities)
+            
+             # Find all indices that achieve the maximum utility
+            max_utility = max(action_utilities)
+            max_indices = [i for i, u in enumerate(action_utilities) if abs(u - max_utility) < 1e-10]
+            
+            if len(max_indices) > 1:
+                # Break ties by computing sender's expected utility for each maximizing action
+                sender_utilities = []
+                for action in max_indices:
+                    sender_utility = 0
+                    for state in range(self.states):
+                        sender_utility += self.true_prior[state] * signaling_scheme[state][signal] * self.sender_utility[state, action]
+                    sender_utilities.append(sender_utility)
+                # Choose the action that maximizes sender utility among the tied actions
+                best_idx = np.argmax(sender_utilities)
+                signal_to_opt_action[signal] = max_indices[best_idx]
+            else:
+                signal_to_opt_action[signal] = max_indices[0]
 
         # now compute the sender utilities for the optimal action of the receiver
         obj_val = 0
@@ -80,12 +88,15 @@ class PersuasionSolver:
         return obj_val
 
 
-    def get_opt_signaling(self, verbose=True, signal_scheme=None):
+    def get_opt_signaling_gurobi(self, verbose=True):
         """ This program assumes |S| = |A|, and uses IC constraints plus revelation principal
             This is without loss of generality since for state-independent signaling |S| = |A| suffices.
 
             Returns the optimal utility (float), optimal signaling scheme (matrix).
         """
+        import gurobipy as gp
+        from gurobipy import GRB
+        
         # define variables, which are essentially the signalling scheme
         # p_w{w}_a{i} denotes the probability of recommending action i when the state is w
         lp_model = gp.Model()
@@ -162,6 +173,106 @@ class PersuasionSolver:
                 print(f'Objective value: z* = {lp_model.getObjective().getValue()}')
                 print(out_signal_scheme)
         return lp_model.getObjective().getValue(), out_signal_scheme
+    
+
+    def get_opt_signaling(self, verbose=True, signal_scheme=None):
+        """ Uses SciPy instead of Gurobi. This is what should be used by default for 
+        integrating with Google codebase
+        """
+        num_states = self.states
+        num_actions = self.actions
+        num_variables = num_states * num_actions
+        
+        # Objective coefficients (minimize negative utility = maximize utility)
+        c = np.zeros(num_variables)
+        for w in range(num_states):
+            for a in range(num_actions):
+                idx = w * num_actions + a
+                c[idx] = -self.true_prior[w] * self.sender_utility[w, a]
+        
+        # IC constraints: A_ub @ x <= b_ub
+        A_ub = []
+        b_ub = []
+        for i in range(num_actions):
+            for j in range(num_actions):
+                if i == j:
+                    continue
+                row = np.zeros(num_variables)
+                for w in range(num_states):
+                    v_delta = self.rec_utility[w, i] - self.rec_utility[w, j]
+                    idx = w * num_actions + i
+                    # Note: We negate the constraint since scipy uses <= form
+                    row[idx] = -self.context_prior[w] * v_delta
+                A_ub.append(row)
+                b_ub.append(0)
+        
+        # Probability sum constraints: A_eq @ x = b_eq
+        A_eq = np.zeros((num_states, num_variables))
+        b_eq = np.ones(num_states)
+        for w in range(num_states):
+            A_eq[w, w*num_actions:(w+1)*num_actions] = 1
+        
+        # Convert to numpy arrays if not already
+        A_ub = np.array(A_ub)
+        b_ub = np.array(b_ub)
+        
+        # Solve using scipy's linprog
+        result = scipy.optimize.linprog(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=(0, 1),
+            method='highs',
+            options={'disp': verbose}
+        )
+        
+        if not result.success:
+            print(f"Optimization failed: {result.message}")
+            return None, None
+        
+        # Reshape solution into states × actions matrix
+        out_signal_scheme = result.x.reshape(num_states, num_actions)
+        
+        if verbose:
+            print('The solution is optimal.')
+            print(f'Objective value: z* = {-result.fun}')  # Negate back since we minimized
+            print(out_signal_scheme)
+        
+        return -result.fun, out_signal_scheme
+
+
+def basic_test():
+    states, actions = 2, 2
+    context_prior = true_prior = [0.7, 0.3]
+
+    # rows denote state and columns denote action
+    rec_utility = np.array([
+        [1, 0],
+        [0, 1]
+    ])
+    sender_utility = np.array([
+        [0, 1],
+        [0, 1]
+    ])
+
+    solver = PersuasionSolver(
+        states=states,
+        actions=actions, 
+        sender_utility=sender_utility, 
+        rec_utility=rec_utility, 
+        true_prior=true_prior, 
+        context_prior=context_prior
+    )
+    #obj_val, scheme = solver.get_opt_signaling(verbose=False)
+    obj_val, scheme = solver.get_opt_signaling(verbose=False)
+    print(f"Objective is: {obj_val}")
+    for i in range(states):
+        print(f"Scheme for state {i}: {scheme[i]}")
+
+    sender_utility = solver.get_utility(scheme)
+    print(f"Sender utility is computed as {sender_utility}") 
 
 
 def test_instance(n, eps=0.01):
@@ -192,4 +303,6 @@ def test_instance(n, eps=0.01):
     
 
 if __name__ == "__main__":
+    basic_test()
     test_instance(4)
+  
