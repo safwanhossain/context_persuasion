@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy
 
+import matplotlib.pyplot as plt
+
 class PersuasionSolver:
     """ Quantitative solver class for the state-independent contextual persuasion problem
         Given instance parameters and a context prior (same for all states), it can compute
@@ -15,6 +17,8 @@ class PersuasionSolver:
         self.rec_utility = rec_utility
         self.true_prior = true_prior
         self.context_prior = context_prior
+        eps = 0.001
+        assert(np.sum(self.context_prior) >= 1-eps and np.sum(self.context_prior) <= 1+eps, context_prior)
 
 
     def _assert_close_equal(self, val, test, tol=1e-3):
@@ -215,7 +219,7 @@ class PersuasionSolver:
         # Convert to numpy arrays if not already
         A_ub = np.array(A_ub)
         b_ub = np.array(b_ub)
-        
+
         # Solve using scipy's linprog
         result = scipy.optimize.linprog(
             c=c,
@@ -301,8 +305,83 @@ def test_instance(n, eps=0.01):
     sender_utility = solver.get_utility(scheme)
     print(f"Sender utility is computed as {sender_utility}")
     
+def real_estate_instance(eps=0.01, sweep=True):
+    states = 4
+    sender_utility = np.array([
+        [0, -0.25],      # good cheap
+		[0, 1],         # good expensive
+		[0, -0.5],        # bad cheap
+		[0, 0.75]        # bad expensive
+    ])
+    rec_utility = np.array([
+        [-1, 0.75],        # good cheap
+	 	[0, -0.25],      # good expensive
+	 	[0, 0.25],       # bad cheap
+	 	[0, -3]         # bad expensive
+    ])
+    true_prior = [0.1, 0.35, 0.3, 0.25]     # Henry
+
+    if sweep:
+        obj_vals = []    
+        for i in range(100):
+            context_prior = np.random.dirichlet(np.ones(4))
+            solver = PersuasionSolver(
+                states=states,
+                actions=2, 
+                sender_utility=sender_utility, 
+                rec_utility=rec_utility, 
+                true_prior=true_prior, 
+                context_prior=context_prior
+            )
+            obj_val, scheme = solver.get_opt_signaling(verbose=False)
+            obj_vals.append(obj_val)
+        
+        # Plotting the obj_vals vector
+        plt.plot(obj_vals)  # Plot the objective values
+        plt.title('Objective Values Over Iterations')  # Title of the plot
+        plt.xlabel('Iteration')  # X-axis label
+        plt.ylabel('Objective Value')  # Y-axis label
+        plt.show()  # Display the plot
+    else:
+        # True prior
+        # context_prior = [0.25, 0.25, 0.25, 0.25]         # Utility: 0.35
+
+        # Baseline/Initialization Priors
+        # context_prior = [0.185, 0.305, 0.165, 0.345]     # Henry (GPT); Utility: 0.378
+        context_prior = [0.155, 0.51, 0.14, 0.195]       # Lilly (GPT); Utility: 0.47 
+        
+        # Refined Henry Prior
+        # context_prior = [0.18, 0.3, 0.165, 0.355]            # Henry (GPT); Utility: 0.4877
+        # context_prior = [0.115, 0.56,  0.18,  0.145]         # Lilly (GPT); Utility: 0.36
+        #context_prior = [0.27,  0.395, 0.14,  0.195]
+
+        # Refined Lilly Prior
+        # context_prior = [0.105, 0.205, 0.26,  0.43 ]     # Henry (GPT); Utility: 0.34
+        # context_prior = [0.235, 0.495, 0.145, 0.125]     # Lilly (GPT); Utility: 0.468
+
+        # Realtor Desc Generic
+        # context_prior = [0.245, 0.295, 0.17, 0.29 ]        # Henry (GPT); Utility 0.401
+        # context_prior = [0.245, 0.465, 0.145, 0.145]        # Lily (GPT); Utility 0.46
+    
+        solver = PersuasionSolver(
+            states=states,
+            actions=2, 
+            sender_utility=sender_utility, 
+            rec_utility=rec_utility, 
+            true_prior=true_prior, 
+            context_prior=context_prior
+        )
+        obj_val, scheme = solver.get_opt_signaling(verbose=False)
+        print(f"Objective is: {obj_val}")
+        for i in range(states):
+            print(f"Scheme for state {i}: {scheme[i]}")
+
+        sender_utility = solver.get_utility(scheme)
+        print(f"Sender utility is computed as {sender_utility}")
+
 
 if __name__ == "__main__":
-    basic_test()
-    test_instance(4)
+    #basic_test()
+    #test_instance(4)
+    real_estate_instance(sweep=False)
   

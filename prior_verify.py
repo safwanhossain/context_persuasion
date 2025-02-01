@@ -2,61 +2,39 @@ import openai
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-
 from openai import OpenAI
 
-## OpenAI credentials and login info
-API_KEY = ""
-ORGANIZATION = ""
-##
+from key import API_KEY, ORGANIZATION
+from constants import (
+    prior_gen_system_prompt,
+    prior_general_desc,
+    prior_consistency_task_desc,
+    prior_task_desc,
+    prior_json_instructions,
+    buyer_desc_henry, 
+    buyer_desc_lilly,
+    initial_realtor_desc,
+    informativeness_prompt,
+    correctness_prompt
+)
+
+
 class LLM_Prior_Generator:
     def __init__(self, api_key, organization, model="gpt-4o-mini", max_tokens=1000):
         self.api_key = api_key
         self.organization = organization
         self.model = model
         self.max_tokens = max_tokens
+        
         # these utility values are only used for the consistency check
         self.utilities = [2, 0, 0, -1]
 
-        self.system_prompt = """You will be used as a proxy for a (human) person looking to buy a house. 
-You will be given a description of the potential buyer (their preferences, etc) and a description 
-of a real estate agent soliciting clients. You will be asked to provide your responses in a JSON format specified in the prompt"""
-
-        self.general_desc = "GENERAL PROBLEM DESCRIPTION: Both the client and realtor are based in Boston. You can imagine a " \
-                        "house has the following features: (good, cheap), (good, expensive), (bad, cheap), (bad, expensive). " \
-                        "Please see below for what constitutes \"good\" and \"bad\" for this buyer that you are acting as a proxy for."
-
-        self.buyer_desc = "BUYER DESCRIPTION: Henry lives in Boston and is an avid outdoors person who enjoys hiking and being in nature. " \
-                    "For him, a \"good\" house has low maintenance, affords easy access to trails, biking, running etc, and far from " \
-                    "hustle of the main city. He lives with his wife and they don't have kids - so they are indifferent to school districts, " \
-                    "etc. A bad house is generally one in a very family oriented neighborhood with stingy HOA rules, maintenance, lawn care " \
-                    "expectations and so on. For him, cheap is anything less that costs less $600,000, with expensive being houses above this"\
-
-        self.prior_task_desc = "TASK: For this realtor, what are Henry's numerical beliefs/probabilities for each of the 4 possible features a house listed " \
-                         "by this realtor could take. Your answer should take into consideration both the realtor and buyer descriptions, along with " \
-                         "general knowledge of the Boston housing market. You may explain your reasoning, but at the end, please give a precise " \
-                         "probability vector (of size 4) for the 4 states a house listed by this realtor can have, according to Henry. " \
-                         "Recall that a probability vector must sum to 1." + """Provide your response in the following JSON format:
-{
-    "probabilities": {
-        "good_cheap": float,
-        "good_expensive": float,
-        "bad_cheap": float,
-        "bad_expensive": float
-    },
-    "reasoning": string
-"""
+        self.system_prompt = prior_gen_system_prompt
+        self.general_desc = prior_general_desc
+        self.prior_task_desc = prior_task_desc
+        self.json_instructions = prior_json_instructions
+        self.consistency_task_desc = prior_consistency_task_desc
         
-        self.consistency_task_desc = "Suppose Henry, who you are proxying for, strongly prefers to buys cheap and good house and hates bad and expensive ones. " \
-                                 "More formally, we can say that they have utility +2 for buying a good+cheap house, -1 for bad+expensive ones, and 0 for the " \
-                                 "remaining two states. Not buying always has utility 0. Given your knowledge of the realtor (through the description) and Henry, if we randomly choose a single house " \
-                                 "from this realtor, and Henry must decide to buy/not buy, what should he do to maximize his utility. Provide your response in the " \
-                                "following JSON format, where 0 means not buy and 1 means buy:" + """
-{
-    "action": bool,
-    "reasoning": string"
-}
-"""       
         # Initialize the OpenAI client with the API key
         self.client = OpenAI(
             api_key=API_KEY,
@@ -64,13 +42,11 @@ of a real estate agent soliciting clients. You will be asked to provide your res
         )
 
 
-    def set_prompt_vars(self, system_prompt=None, general_desc=None, buyer_desc=None, task_desc=None, consistency_desc=None):
+    def set_prompt_vars(self, system_prompt=None, general_desc=None, task_desc=None, consistency_desc=None):
         if system_prompt:
             self.system_prompt = system_prompt
         if general_desc:
             self.general_desc = general_desc
-        if buyer_desc:
-            self.buyer_desc = buyer_desc
         if task_desc:
             self.prior_task_desc = task_desc
         if consistency_desc:
@@ -109,26 +85,48 @@ of a real estate agent soliciting clients. You will be asked to provide your res
                 top_p=1.0
             )
             # Extract and return the response text
-            return [json.loads(response.choices[i].message.content) for i in range(len(response.choices))]
+            responses = []
+            for i in range(len(response.choices)):
+                content = response.choices[i].message.content
+                # Handle both string and dict responses
+                if isinstance(content, str):
+                    responses.append(json.loads(content))
+                else:
+                    responses.append(content)
+            return responses
         except Exception as e:
-            return f"An error occurred: {e}"
-
+            print(f"Error in get_openai_response: {e}")
+            print(f"Response content: {response.choices[0].message.content if 'response' in locals() else 'No response'}")
+            # Instead of returning a string, raise the exception
+            raise e
 
     def get_prior(
         self,
+        buyer_name,
+        buyer_desc,
         realtor_desc, 
         num_iters,
     ):
         results = np.zeros((num_iters, 4))
-        user_prompt = "\n\n".join([self.general_desc, self.buyer_desc, realtor_desc, self.prior_task_desc])
-        responses = self.get_openai_response(self.system_prompt, user_prompt, num_iters)
-        for i in range(num_iters):
-            results[i] = [responses[i]["probabilities"][key] for key in responses[i]["probabilities"]]
-        return results
+        reasonings = ["" for i in range(num_iters)]
+
+        user_prompt = "\n\n".join([self.general_desc, buyer_desc, realtor_desc, self.prior_task_desc.format(buyer_name=buyer_name), self.json_instructions])
+        try:
+            responses = self.get_openai_response(self.system_prompt, user_prompt, num_iters)
+            for i in range(num_iters):
+                results[i] = [responses[i]["probabilities"][key] for key in responses[i]["probabilities"]]
+                reasonings[i] = responses[i]["reasoning"]
+            return results, reasonings
+        except Exception as e:
+            print(f"Error in get_prior: {e}")
+            # Return some default values or raise the exception depending on your needs
+            raise e
 
 
     def get_prior_with_consistency(
         self,
+        buyer_name,
+        buyer_desc,
         realtor_desc,
         num_iters
     ):
@@ -136,13 +134,13 @@ of a real estate agent soliciting clients. You will be asked to provide your res
         # appended to anything
         consistent_actions_before = 0
         for i in range(num_iters):
-            llm_action_before = self.check_prior_consistency(realtor_desc, standalone=True) 
+            llm_action_before = self.check_prior_consistency(buyer_name, buyer_desc, realtor_desc, standalone=True) 
             consistent_actions_before += llm_action_before
 
         results = np.zeros((num_iters, 4))
         consistent_actions_after = 0
         opt_actions = 0
-        user_prompt = "\n\n".join([self.general_desc, self.buyer_desc, realtor_desc, self.prior_task_desc])
+        user_prompt = "\n\n".join([self.general_desc, buyer_desc, realtor_desc, self.prior_task_desc.format(buyer_name=buyer_name), self.json_instructions])
         responses = self.get_openai_response(self.system_prompt, user_prompt, num_iters)
         for i in range(num_iters):
             results[i] = [responses[i]["probabilities"][key] for key in responses[i]["probabilities"]]
@@ -152,7 +150,7 @@ of a real estate agent soliciting clients. You will be asked to provide your res
             if np.dot(self.utilities, results[i]) >= 0:
                 opt_action = 1
                 opt_actions += opt_action
-            llm_action = self.check_prior_consistency(realtor_desc, responses[i])
+            llm_action = self.check_prior_consistency(buyer_name, buyer_desc, realtor_desc, llm_response=responses[i])
             if llm_action == opt_action:
                 consistent_actions_after += 1             
        
@@ -164,73 +162,127 @@ of a real estate agent soliciting clients. You will be asked to provide your res
         }
     
 
-    def check_prior_consistency(self, realtor_desc, llm_response=None, standalone=False):
+    def check_prior_consistency(self, buyer_name, buyer_desc, realtor_desc, llm_response=None, standalone=False):
         # convert to text
         llm_response = json.dumps(llm_response)
 
         # In standalone mode, we ask this consistency check directly and not within the same conversation
         # context where they generated the prior.
         if standalone:
-            user_prompt = "\n\n".join([self.general_desc, self.buyer_desc, realtor_desc, self.consistency_task_desc])
+            user_prompt = "\n\n".join([self.general_desc, buyer_desc, realtor_desc, self.consistency_task_desc.format(buyer_name=buyer_name)])
             response = self.get_openai_response(self.system_prompt, user_prompt)
             return response[0]["action"]
         else:        
             assert llm_response
-            user_prompt = "\n\n".join([self.general_desc, self.buyer_desc, realtor_desc, self.prior_task_desc])
+            user_prompt = "\n\n".join([self.general_desc, buyer_desc, realtor_desc, self.prior_task_desc.format(buyer_name=buyer_name)])
             response = self.get_openai_response(self.system_prompt, user_prompt, llm_response=llm_response, user_prompt2=self.consistency_task_desc)
             return response[0]["action"]
 
 
+    def rate_desc_quality_and_correctness(self, true_realtor_desc, gen_realtor_desc, correctness_weight=0.75, informative_weight=0.25, verbose=False):
+        # When then LLM generates a realtor description, we want to ensure that it is correct and accurate with respect to the 
+        # factual information we have about them. 
+        # 
+        # We also want to ensure that the prompt uses relevant information about the realtor and does not simply generate a 
+        # bunch of generic fluff text. We want the text generated to be well targetted to the buyer while also capturing the relevant
+        # properties of the realtor. This ensures generalization beyond a single LLM, since uninformative context ends up relying on
+        # the default behaviour of the LLM. We want to be less strict about this though since uninformative-ness could be a valid
+        # strategy
+        true_realtor_desc = true_realtor_desc.replace("REALTOR_DESCRIPTION", "")
+        true_realtor_desc = true_realtor_desc.replace("REALTOR_DESC", "")
+        true_realtor_desc = "REALTOR_PROFILE: " + true_realtor_desc
+
+        gen_realtor_desc = gen_realtor_desc.replace("REALTOR_DESCRIPTION", "")
+        gen_realtor_desc = gen_realtor_desc.replace("REALTOR_DESC", "")
+        gen_realtor_desc = "REALTOR_DESC: " + gen_realtor_desc
+
+        num_iters = 1
+        full_correctness_prompt = "\n\n".join([correctness_prompt, true_realtor_desc, gen_realtor_desc])
+        full_informativeness_prompt = "\n\n".join([informativeness_prompt, true_realtor_desc, gen_realtor_desc]) 
+
+        correctness_responses = self.get_openai_response("", full_correctness_prompt, num_iters)
+        informativeness_responses = self.get_openai_response("", full_informativeness_prompt, num_iters)
+        if verbose:
+            print(informativeness_responses)
+            print(correctness_responses)
+
+        correctness_score, informativeness_score = 0, 0
+        for i in range(num_iters):
+            correctness_score += correctness_responses[i]["correctness_score"]
+            informativeness_score += informativeness_responses[i]["informativeness_score"]
+        
+        correctness_score /= num_iters
+        informativeness_score /= num_iters
+        return correctness_score, informativeness_score, correctness_responses[i]["reasoning"], informativeness_responses[i]["reasoning"] 
+    
+
 if __name__ == "__main__":
     prior_generator = LLM_Prior_Generator(API_KEY, ORGANIZATION)    
-    realtor_desc_jeremy = "REALTOR DESCRIPTION: Meet Jeremy, a Boston real estate agent dedicated to helping young couples find their perfect " \
-                "first home! He understands the value of a starter home and the great outdoors Boston offers. He is passionate about matching "\
-                "clients with properties that embrace Boston\’s urban charm while keeping nature close. Let Jeremy guide you "\
-                "to a space that feels like home—a place where affordability meets adventure and nature is never far from your doorstep."
+    consistency_check = True
+    correct_info_check = False
 
-    realtor_desc_holly = "Holly is a top-performing realtor with expertise in family-friendly neighborhoods and well-maintained suburban " \
-        "communities. She has a reputation for connecting clients with homes that foster strong neighbourhood values and comoradarie. Holly loves " \
-        "working with families and understands their needs being near good schools, large floor-plan and square footage, kid-friendly ameneties and so on. " \
-        "Working with Holly means finding your family's dream forever home!"
+    realtor_desc_refined_for_henry = "REALTOR_DESC: Introducing Jeremy Hammond, a committed realtor with 8 years of experience, including 2 years at our firm and 6 years as both a realtor and contractor. Residing in Downtown Boston with his family, Jeremy blends personal insights with professional expertise to effectively navigate the local market. His enthusiasm for outdoor activities enriches his understanding of properties that may offer desirable features such as access to nature. Jeremy is dedicated to ensuring you find quality homes that align with your lifestyle and budget, making your home-buying journey an enjoyable and fulfilling experience."
+    realtor_desc_refined_for_lilly = "REALTOR_DESC: Jeremy Hammond is a seasoned realtor with over 8 years of experience, including 2 years at our firm. His background as a contractor equips him with a thorough understanding of home quality, making him an invaluable resource for families. Residing in Downtown Boston with his wife and three children, Jeremy is well-versed in the dynamics of family-friendly neighborhoods and the importance of community involvement. His active participation in homeowner associations reflects his commitment to enhancing local ties. Jeremy is dedicated to helping families find spacious, inviting homes that foster comfort and a sense of belonging."
+    realtor_desc_no_info =  "REALTOR DESCRIPTION: A dedicated and highly experienced real estate agent" \
+                            " specializing in the Massachussets area. Proven success in navigating"  \
+                            " complex negotiations and market trends to provide exceptional client" \
+                            " experiences. Known for personalized attention and exceeding client" \
+                            " expectations. Let's discuss your real estate needs!" 
 
-    num_iters = 20
+    # Choose which prompt you want to run
+    realtor_prompt = realtor_desc_no_info
+
+    if correct_info_check:
+        c_score, i_score, _, _ = prior_generator.rate_desc_quality_and_correctness(
+            initial_realtor_desc, 
+            realtor_prompt, 
+            verbose=True
+        )
+        print(c_score, i_score)
+
+    # Plot the mean and std for each of the two buyer types when faced with the given realtor prompt
+    num_iters = 10
     conf = 1.645
-    
-    #jeremy_prior = prior_generator.get_prior(realtor_desc_jeremy, num_iters=num_iters)
-    #holly_prior = prior_generator.get_prior(realtor_desc_holly, num_iters=num_iters)
-    jeremy_result_dict = prior_generator.get_prior_with_consistency(realtor_desc_jeremy, num_iters=num_iters)
-    holly_result_dict = prior_generator.get_prior_with_consistency(realtor_desc_holly, num_iters=num_iters)
-    
-    # Print the results before the LLM was asked to generate a prior
-    print(f"LLM decides to buy {100*jeremy_result_dict['num_buys_before']/num_iters}% of the time on Jeremy instance, before generating prior")
-    print(f"LLM decides to buy {100*holly_result_dict['num_buys_before']/num_iters}% of the time on Holly instance, before generating prior") 
-    print("\n")
-    print(f"On the priors generated for Jeremy, on {100*jeremy_result_dict['num_buys_opt']/num_iters}% them, the optimal action was buy")
-    print(f"On the priors generated for Holly, on {100*holly_result_dict['num_buys_opt']/num_iters}% them, the optimal action was buy")
-    print("\n")
-    print(f"(Jeremy): After generating the prior, when asked about the optimal action, the LLM is consistent {100*jeremy_result_dict['num_consistent_actions']/num_iters}% of the time.")
-    print(f"(Holly): After generating the prior, when asked about the optimal action, the LLM is consistent {100*holly_result_dict['num_consistent_actions']/num_iters}% of the time.")
-    
-    mean_jeremy = np.mean(jeremy_result_dict["results"], axis=0)
-    mean_holly = np.mean(holly_result_dict["results"], axis=0)
-    print(f"The means for Jeremy is: {mean_jeremy}")
-    print(f"The means for Holly is: {mean_holly}")
 
-    conf_jeremy = conf*(np.std(jeremy_result_dict["results"], axis=0) / np.sqrt(num_iters))
-    conf_holly = conf*(np.std(jeremy_result_dict["results"], axis=0) / np.sqrt(num_iters))    
+    henry_prior, _ = prior_generator.get_prior("Henry", buyer_desc_henry, realtor_prompt, num_iters=num_iters)
+    mean_henry = np.mean(henry_prior, axis=0)    
+    lilly_prior, _ = prior_generator.get_prior("Lilly", buyer_desc_lilly, realtor_prompt, num_iters=num_iters)
+    mean_lilly = np.mean(lilly_prior, axis=0)
+    
+    conf_henry = conf*(np.std(henry_prior, axis=0) / np.sqrt(num_iters))
+    conf_lilly = conf*(np.std(lilly_prior, axis=0) / np.sqrt(num_iters))    
+  
+    print(f"The mean belief for Henry is: {mean_henry}")
+    print(f"The mean belief for Lilly is: {mean_lilly}")
 
     # Create a scatter plot with error bars
     x_labels = ['Good+Cheap', 'Good+Expensive', 'Bad+Cheap', 'Bad+Expensive']
     x = np.arange(len(x_labels))  # the label locations
 
     # Plotting
-    plt.errorbar(x, mean_jeremy, yerr=conf_jeremy, fmt='o', label='Jeremy Prior', capsize=5)
-    plt.errorbar(x, mean_holly, yerr=conf_holly, fmt='o', label='Holly Prior', capsize=5)
+    plt.errorbar(x, mean_henry, yerr=conf_henry, fmt='o', label='Henry Prior', capsize=5)
+    plt.errorbar(x, mean_lilly, yerr=conf_lilly, fmt='o', label='Lilly Prior', capsize=5)
 
     # Adding labels and title
     plt.xticks(x, x_labels)
     plt.ylabel('Prior Values')
-    plt.title('Priors with Error Bars for Jeremy and Holly')
+    plt.title('Priors with Error Bars for Lilly')
     plt.legend()
     plt.show()
+
+    num_iters = 10
+    if consistency_check:
+        henry_result_dict = prior_generator.get_prior_with_consistency("Henry", buyer_desc_henry, realtor_prompt, num_iters=num_iters)
+        lilly_result_dict = prior_generator.get_prior_with_consistency("Lilly", buyer_desc_lilly, realtor_prompt, num_iters=num_iters)
+        
+        # Print the results before the LLM was asked to generate a prior
+        print(f"LLM decides to buy {100*henry_result_dict['num_buys_before']/num_iters}% of the time on Henry instance, before generating prior")
+        print(f"LLM decides to buy {100*lilly_result_dict['num_buys_before']/num_iters}% of the time on lilly instance, before generating prior") 
+        print("\n")
+        print(f"On the priors generated for Henry, on {100*henry_result_dict['num_buys_opt']/num_iters}% them, the optimal action was buy")
+        print(f"On the priors generated for Lilly, on {100*lilly_result_dict['num_buys_opt']/num_iters}% them, the optimal action was buy")
+        print("\n")
+        print(f"(Henry): After generating the prior, when asked about the optimal action, the LLM is consistent {100*henry_result_dict['num_consistent_actions']/num_iters}% of the time.")
+        print(f"(Lilly): After generating the prior, when asked about the optimal action, the LLM is consistent {100*lilly_result_dict['num_consistent_actions']/num_iters}% of the time.")
+        
     
