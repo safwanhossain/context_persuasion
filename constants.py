@@ -46,13 +46,23 @@ prior_json_instructions = """Provide your response in the following JSON format:
 """
 
 prior_consistency_task_desc = "Suppose {buyer_name}, who you are proxying for, strongly prefers to buys cheap and good house and hates bad and expensive ones. " \
-                                 "More formally, we can say that they have utility +2 for buying a good+cheap house, -1 for bad+expensive ones, and 0 for the " \
-                                 "remaining two states. Not buying always has utility 0. Given your knowledge of the realtor (through the description) and {buyer_name}, if we randomly choose a single house " \
-                                 "from this realtor, and {buyer_name} must decide to buy/not buy, what should he do to maximize his utility. Provide your response in the " \
+                                "More formally, we can say that they have utility -1 for not buying a cheap and good home and 0 for not buying at other states. " \
+                                "As for buying, they get utility 0.75 for buying good and cheap house, -0.25 for buying good and expensive homes, 0.25 for buying "\
+                                "bad and cheap home, and -3 for buying bad and expensive homes. Assuming the buyer is expectation maximizing and "\
+                                "Given your knowledge of the realtor (through the description) and {buyer_name}, if we randomly choose a single house " \
+                                "from this realtor, and {buyer_name} must decide to buy/not buy, what should he do to maximize his utility. Provide your response in the " \
                                 "following JSON format, where 0 means not buy and 1 means buy:" + """
 "action": bool,
 "reasoning": string"
 """
+
+# +2 for buying a good+cheap house, -1 for bad+expensive ones, and 0 for the " \
+#                                  "remaining two states. Not buying always has utility 0. Given your knowledge of the realtor (through the description) and {buyer_name}, if we randomly choose a single house " \
+#                                  "from this realtor, and {buyer_name} must decide to buy/not buy, what should he do to maximize his utility. Provide your response in the " \
+#                                 "following JSON format, where 0 means not buy and 1 means buy:" + """
+# "action": bool,
+# "reasoning": string"
+# """
 
 ### The prompts for LLM search
 search_system_prompt = "You will be asked to generate a short description/bio of a realtor (in json format) to make them appeal to a specific buyer." \

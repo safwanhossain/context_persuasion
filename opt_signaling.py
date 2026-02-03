@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy
+import itertools
 
 import matplotlib.pyplot as plt
 
@@ -305,6 +306,19 @@ def test_instance(n, eps=0.01):
     sender_utility = solver.get_utility(scheme)
     print(f"Sender utility is computed as {sender_utility}")
     
+def generate_probability_vectors(size=4, step=0.02):
+    values = np.arange(0, 1 + step, step)  # Possible values in increments of step
+    valid_vectors = []
+    
+    # Generate all possible combinations of 'size' elements that sum to 1
+    for combination in itertools.product(values, repeat=size):
+        if np.isclose(sum(combination), 1.0):
+            valid_vectors.append(combination)
+            yield combination
+    #return valid_vectors
+
+# Henry opt is 0.5125
+
 def real_estate_instance(eps=0.01, sweep=True):
     states = 4
     sender_utility = np.array([
@@ -319,8 +333,8 @@ def real_estate_instance(eps=0.01, sweep=True):
 	 	[0, 0.25],       # bad cheap
 	 	[0, -3]         # bad expensive
     ])
-    true_prior = [0.1, 0.35, 0.3, 0.25]     # Henry
-
+    #true_prior = [0.1, 0.35, 0.3, 0.25]     # Henry
+    true_prior = [0.2, 0.4, 0.1, 0.3]
     if sweep:
         obj_vals = []    
         for i in range(100):
@@ -343,29 +357,106 @@ def real_estate_instance(eps=0.01, sweep=True):
         plt.ylabel('Objective Value')  # Y-axis label
         plt.show()  # Display the plot
     else:
-        # True prior
-        # context_prior = [0.25, 0.25, 0.25, 0.25]         # Utility: 0.35
+        # Base prior:
+        #     Lilly: [0.15, 0.52, 0.16, 0.17] - 0.373
+        #     Henry: [0.205, 0.36, 0.185, 0.25] - 0.373
 
-        # Baseline/Initialization Priors
-        # context_prior = [0.185, 0.305, 0.165, 0.345]     # Henry (GPT); Utility: 0.378
-        context_prior = [0.155, 0.51, 0.14, 0.195]       # Lilly (GPT); Utility: 0.47 
+        # Refined prior Lilly:
+        #     Lily: [0.25 0.48 0.15 0.12] - 0.40
+        #     Henry: [0.115, 0.315, 0.18,  0.39 ]
+
+        # Refined prior for Henry:
+        #     Lilly: [0.24,  0.475, 0.15,  0.135]
+        #     Henry: [0.35, 0.315, 0.18, 0.155] - 0.494
+  
+        #true_prior = [0.1, 0.35, 0.3, 0.25] 
+        true_prior = [0.2, 0.4, 0.1, 0.3]
+        max_val = 0
+        # Generate probability vectors of size 4
+        probability_vectors = generate_probability_vectors()
+        # print(f"Total number of vectors: {len(probability_vectors)}")
+
+        for context_prior in probability_vectors:    
+            solver = PersuasionSolver(
+                states=states,
+                actions=2, 
+                sender_utility=sender_utility, 
+                rec_utility=rec_utility, 
+                true_prior=true_prior, 
+                context_prior=context_prior
+            )
+            obj_val, scheme = solver.get_opt_signaling(verbose=False)
+            if obj_val > max_val:
+                max_val = obj_val
+            print(f"{context_prior}: The current max val is: {max_val}, obj_val is: {obj_val}")
+            #print(f"Objective is: {obj_val}")
+            #for i in range(states):
+            #    print(f"Scheme for state {i}: {scheme[i]}")
+
+            #sender_utility = solver.get_utility(scheme)
+            #print(f"Sender utility is computed as {sender_utility}")
+
+def patagonia_instance(sweep=False):
+    states = 4
+    actions = 3
+
+    from constants_patagonia import sender_utility_hard, rec_utility_hard, true_prior
+
+    if sweep:
+        obj_vals = []    
+        context_priors = []
+        for i in range(300):
+            context_prior = np.random.dirichlet(np.ones(4))
+            context_priors.append(context_prior)
+            solver = PersuasionSolver(
+                states=states,
+                actions=actions, 
+                sender_utility=sender_utility_hard, 
+                rec_utility=rec_utility_hard, 
+                true_prior=true_prior, 
+                context_prior=context_prior
+            )
+            obj_val, scheme = solver.get_opt_signaling(verbose=False)
+            obj_vals.append(obj_val)
         
-        # Refined Henry Prior
-        # context_prior = [0.18, 0.3, 0.165, 0.355]            # Henry (GPT); Utility: 0.4877
-        # context_prior = [0.115, 0.56,  0.18,  0.145]         # Lilly (GPT); Utility: 0.36
-        #context_prior = [0.27,  0.395, 0.14,  0.195]
+        # Get the utility at true prior
+        context_prior = true_prior
+        solver = PersuasionSolver(
+                states=states,
+                actions=actions, 
+                sender_utility=sender_utility_hard, 
+                rec_utility=rec_utility_hard, 
+                true_prior=true_prior, 
+                context_prior=context_prior
+        )
+        true_prior_obj, scheme = solver.get_opt_signaling(verbose=False) 
 
-        # Refined Lilly Prior
-        # context_prior = [0.105, 0.205, 0.26,  0.43 ]     # Henry (GPT); Utility: 0.34
-        # context_prior = [0.235, 0.495, 0.145, 0.125]     # Lilly (GPT); Utility: 0.468
+        index_min = np.argmin(np.array(obj_vals))
+        index_max = np.argmax(np.array(obj_vals))
+        print(f"The worst context prior is: {context_priors[index_min]} with obj value: {obj_vals[index_min]}")
+        print(f"The best context prior is: {context_priors[index_max]} with obj value: {obj_vals[index_max]}")
+        print(f"Using the true prior given sender utility: {true_prior_obj}")
 
-        # Realtor Desc Generic
-        # context_prior = [0.245, 0.295, 0.17, 0.29 ]        # Henry (GPT); Utility 0.401
-        # context_prior = [0.245, 0.465, 0.145, 0.145]        # Lily (GPT); Utility 0.46
+        # Plotting the obj_vals vector
+        plt.plot(obj_vals, label="Random Context Prior")  # Plot the objective values
+        plt.axhline(y=true_prior_obj, label="True Prior", color='r')
+        plt.title('Objective Values Over Iterations')  # Title of the plot
+        
+        plt.xlabel('Iteration')  # X-axis label
+        plt.ylabel('Objective Value')  # Y-axis label
+        plt.show()  # Display the plot
     
+    else:
+        opt_context_prior_1 = [0.68, 0.27, 0.04, 0.01]
+        opt_context_prior_2 = [0.1, 0.31, 0.54, 0.04]
+        #context_prior = true_prior
+        og_context_prior = [0.225, 0.125, 0.5, 0.15]
+        llm_context_prior = [0.54, 0.295, 0.095, 0.07]
+        context_prior = llm_context_prior
+        #context_prior = opt_context_prior_2
         solver = PersuasionSolver(
             states=states,
-            actions=2, 
+            actions=actions, 
             sender_utility=sender_utility, 
             rec_utility=rec_utility, 
             true_prior=true_prior, 
@@ -377,11 +468,11 @@ def real_estate_instance(eps=0.01, sweep=True):
             print(f"Scheme for state {i}: {scheme[i]}")
 
         sender_utility = solver.get_utility(scheme)
-        print(f"Sender utility is computed as {sender_utility}")
+        print(f"Sender utility is computed as {sender_utility}") 
 
 
 if __name__ == "__main__":
     #basic_test()
     #test_instance(4)
-    real_estate_instance(sweep=False)
-  
+    #real_estate_instance(sweep=False)
+    patagonia_instance(sweep=True)

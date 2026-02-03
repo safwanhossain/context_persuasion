@@ -39,7 +39,7 @@ def search_contexts(buyer_name, buyer_desc, sender_utility, rec_utility, true_pr
     ]
 
     final_scores, utilities, c_scores, i_scores = [], [], [], []
-    for i in range(10):
+    for i in range(2):
         try: 
             response = client.chat.completions.create(
                 model=model,
@@ -86,16 +86,17 @@ def search_contexts(buyer_name, buyer_desc, sender_utility, rec_utility, true_pr
                 "role" : "user",
                 "content" : feedback_str
             })
+            print(f"{current_desc}, utility: {utility}, c_score: {c_score}")
         except Exception as e:
             print(f"error: {e}")
             return f"An error occurred: {e}"
     
     iterations = range(1, len(final_scores) + 1)
     plt.figure(figsize=(10, 6))
-    plt.plot(iterations, final_scores, 'b-', label='Final Score', alpha=1.0, linewidth=1.5)
-    plt.plot(iterations, utilities, 'r:', label='Realtor Utility', alpha=0.6)
-    plt.plot(iterations, c_scores, 'g:', label='Correctness Score', alpha=0.6)
-    plt.plot(iterations, i_scores, 'y:', label='Informativeness Score', alpha=0.6)
+    plt.plot(iterations, final_scores, 'b', label='Final Score', linewidth=1.5)
+    plt.plot(iterations, utilities, 'r', label='Realtor Utility', linewidth=1.5)
+    #plt.plot(iterations, c_scores, 'g:', label='Correctness Score', alpha=0.6)
+    #plt.plot(iterations, i_scores, 'y:', label='Informativeness Score', alpha=0.6)
     
     plt.xlabel('Iteration')
     plt.ylabel('Scores')
