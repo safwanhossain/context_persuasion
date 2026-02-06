@@ -1,5 +1,6 @@
 from openai import OpenAI
 import json
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,12 +27,26 @@ from constants_patagonia import rec_utility_hard as rec_utility
 
 from key import API_KEY, ORGANIZATION
 
+# Try to import Anthropic key if available
+try:
+    from key import ANTHROPIC_API_KEY
+except ImportError:
+    ANTHROPIC_API_KEY = None
+
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
     "font.serif": ["Computer Modern Roman"],
-    "font.size": 12,
+    "font.size": 15,
 })
+
+plt.rcParams['text.usetex'] = True
+plt.rcParams['font.weight'] = 'bold'
+plt.rcParams['text.latex.preamble'] = r'\usepackage{amsfonts}\usepackage{amsmath}\boldmath\bfseries' # or other packages that support bold
+
+# Set the font family (e.g., to serif fonts often used with LaTeX)
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Computer Modern Roman'] # Or other serif fonts
 
 
 def format_prior_delta(prev_prior, curr_prior):
@@ -59,7 +74,31 @@ def format_prior_delta(prev_prior, curr_prior):
     return "; ".join(parts) if parts else "No significant change in beliefs"
 
 
-def search_contexts(buyer_desc, sender_utility, rec_utility, true_prior, num_iters=5, exploration_nudge=False, nudge_threshold=3, context_window=3):
+def _extract_json_from_text(text):
+    """Extract JSON from text, handling markdown code blocks (for Anthropic)."""
+    # Try to find JSON in code blocks first
+    code_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if code_block_match:
+        try:
+            return json.loads(code_block_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Try to parse the entire text as JSON
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    # Try to find JSON object in text
+    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+    raise ValueError(f"Could not extract JSON from response: {text[:200]}...")
+
+
+def search_contexts(buyer_desc, sender_utility, rec_utility, true_prior, num_iters=5, exploration_nudge=False, nudge_threshold=3, context_window=3, provider="openai", model=None):
     """
     Search for optimal brand framing using LLM feedback loop.
 
@@ -67,18 +106,34 @@ def search_contexts(buyer_desc, sender_utility, rec_utility, true_prior, num_ite
         exploration_nudge: If True, prompt LLM to try different approach when stuck
         nudge_threshold: Number of rounds without improvement before nudging
         context_window: Number of previous rounds to include in context (default 3)
+        provider: "openai" or "anthropic"
+        model: Model name (optional, uses defaults per provider)
     """
-    client = OpenAI(
-        api_key=API_KEY,
-        organization=ORGANIZATION,
-    )
-    #model = "gpt-5-mini-2025-08-07"
-    model = "gpt-5.2"
+    # Set default model based on provider
+    if model is None:
+        model = "gpt-5.2" if provider == "openai" else "claude-sonnet-4-20250514"
+
+    # Initialize the appropriate client
+    if provider == "openai":
+        client = OpenAI(
+            api_key=API_KEY,
+            organization=ORGANIZATION,
+        )
+    elif provider == "anthropic":
+        import anthropic
+        if not ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY not set in key.py")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
     max_tokens = 10000
     states = 4
     actions = 3
 
-    prior_generator = LLM_Prior_Generator(API_KEY, ORGANIZATION, model, max_tokens)
+    # Use the correct API key for the provider
+    api_key = API_KEY if provider == "openai" else ANTHROPIC_API_KEY
+    prior_generator = LLM_Prior_Generator(api_key, ORGANIZATION, model, max_tokens, provider=provider)
 
     # Add context window info to the prompt
     context_note = f"NOTE: You will receive feedback from the last {context_window} rounds to help you learn patterns. Use this history to understand what works and what doesn't."
@@ -142,18 +197,38 @@ def search_contexts(buyer_desc, sender_utility, rec_utility, true_prior, num_ite
                             "content": f"ROUND_{round_num}_FEEDBACK:\n{feedback}"
                         })
 
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_completion_tokens=max_tokens,
-                    n=1,
-                    response_format={"type": "json_object"},
-                    top_p=1.0
-                )
-                # Extract and return the response text
-                current_resp = response.choices[0].message.content
-                if isinstance(current_resp, str):
-                    current_resp = json.loads(current_resp)
+                # Call the appropriate API
+                if provider == "openai":
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_completion_tokens=max_tokens,
+                        n=1,
+                        response_format={"type": "json_object"},
+                        top_p=1.0
+                    )
+                    current_resp = response.choices[0].message.content
+                    if isinstance(current_resp, str):
+                        current_resp = json.loads(current_resp)
+                else:
+                    # Anthropic API
+                    # Extract system prompt from first user message and prepend JSON instruction
+                    system_content = prompt + "\n\nIMPORTANT: You must respond with valid JSON only containing BRAND_MOTTO and PRODUCT_LINE_DESC keys."
+                    # Filter out the first user message (prompt) since we use it as system
+                    anthropic_messages = messages[1:] if messages else []
+                    if not anthropic_messages:
+                        anthropic_messages = [{"role": "user", "content": "Generate your first attempt."}]
+
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=max_tokens,
+                        system=system_content,
+                        messages=anthropic_messages,
+                        top_p=1.0
+                    )
+                    content = response.content[0].text if response.content else ""
+                    current_resp = _extract_json_from_text(content)
+
                 current_motto = current_resp.get("BRAND_MOTTO", "")
                 if current_motto == "":
                     print("Empty String for current motto")
@@ -251,7 +326,7 @@ def search_contexts(buyer_desc, sender_utility, rec_utility, true_prior, num_ite
             feedback_parts.append(
                 "Please generate the next BRAND_MOTTO and PRODUCT_LINE_DESC in JSON format. "
                 "Use natural language and "
-                "Try to learn from the belief changes and their effect on utility."
+                "Try to learn from the belief changes and their effect on utility. Feel free to explore and try new things."
             )
 
             # Exploration nudge when stuck (in addition to repetition warning)
@@ -399,47 +474,45 @@ def load_results_from_csv(filename="search_results_patagonia.csv"):
     return results
 
 
-def plot_search_results(utilities, priors_history, best_round, save_path='figures/search_results.png'):
+def plot_search_results(utilities, priors_history, best_round, save_path='figures/search_results.png', utilities_second=None):
     """Plot utility over iterations and prior evolution."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 1, figsize=(8, 6))
 
     iterations = range(1, len(utilities) + 1)
 
     # Plot 1: Utility over iterations
-    ax1 = axes[0]
-    ax1.plot(iterations, utilities, 'b-o', linewidth=1.5, markersize=6, label='Utility')
-    ax1.axhline(y=max(utilities), color='g', linestyle='--', alpha=0.7, label=f'Best: {max(utilities):.3f}')
-    ax1.axvline(x=best_round, color='r', linestyle=':', alpha=0.7, label=f'Best round: {best_round}')
-    ax1.set_xlabel('Iteration')
-    ax1.set_ylabel('Brand Utility')
-    ax1.set_title('Utility Evolution Over Search')
+    ax1 = axes
+    ax1.plot(iterations, utilities, 'b-o', linewidth=1.5, markersize=6, label=r'\textbf{GPT 5.2 Score}')
+    if utilities_second:
+        ax1.plot(iterations, utilities_second, 'r-o', linewidth=1.5, markersize=6, label=r'\textbf{Sonnet 4 Score}')
+    ax1.axhline(y=6.87, color='g', linestyle='--', alpha=0.7, label=r'\textbf{Max Possible Score}')
+
+    #ax1.axhline(y=max(utilities), color='g', linestyle='--', alpha=0.7, label=f'Best: {max(utilities):.3f}')
+    #ax1.axvline(x=best_round, color='r', linestyle=':', alpha=0.7, label=f'Best round: {best_round}')
+    ax1.set_xlabel(r'\textbf{Iteration}')
+    ax1.set_ylabel(r'\textbf{Score}')
+    ax1.set_title(r'\textbf{Score Evolution Over Search Iterations - Advertising}')
+    ax1.set_ylim(2, 7.5)
     ax1.legend(loc='lower right')
     ax1.grid(True, alpha=0.3)
 
     # Plot 2: Prior components over iterations
-    ax2 = axes[1]
-    priors_array = np.array(priors_history)
-    labels = ['T+D', 'T+ND', 'NT+D', 'NT+ND']
-    colors = ['#2ecc71', '#27ae60', '#e74c3c', '#c0392b']
+    # ax2 = axes[1]
+    # priors_array = np.array(priors_history)
+    # labels = ['T+D', 'T+ND', 'NT+D', 'NT+ND']
+    # colors = ['#2ecc71', '#27ae60', '#e74c3c', '#c0392b']
 
-    for j, (label, color) in enumerate(zip(labels, colors)):
-        ax2.plot(iterations, priors_array[:, j], '-o', color=color, linewidth=1.5, markersize=4, label=label)
-        # Add horizontal line for best possible prior target
-        ax2.axhline(y=best_possible_prior[j], color=color, linestyle=':', alpha=0.5)
+    # for j, (label, color) in enumerate(zip(labels, colors)):
+    #     ax2.plot(iterations, priors_array[:, j], '-o', color=color, linewidth=1.5, markersize=4, label=label)
+    #     # Add horizontal line for best possible prior target
+    #     ax2.axhline(y=best_possible_prior[j], color=color, linestyle=':', alpha=0.5)
 
-    # Also plot trendy total (T+D + T+ND)
-    # trendy_total = priors_array[:, 0] + priors_array[:, 1]
-    # ax2.plot(iterations, trendy_total, 'k--', linewidth=2, label='Trendy Total')
-    # # Best possible trendy total
-    # best_trendy_total = best_possible_prior[0] + best_possible_prior[1]
-    # ax2.axhline(y=best_trendy_total, color='k', linestyle=':', alpha=0.5, label=f'Optimal Trendy: {best_trendy_total:.2f}')
-
-    ax2.set_xlabel('Iteration')
-    ax2.set_ylabel('Probability')
-    ax2.set_title('Prior Belief Evolution (dotted = optimal)')
-    ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(0, 1)
+    # ax2.set_xlabel('Iteration')
+    # ax2.set_ylabel('Probability')
+    # ax2.set_title('Prior Belief Evolution (dotted = optimal)')
+    # ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    # ax2.grid(True, alpha=0.3)
+    # ax2.set_ylim(0, 1)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -458,13 +531,164 @@ def plot_from_csv(filename="search_results_patagonia.csv", save_path='figures/se
     )
     return results   
 
+def plot_belief_comparison(save_path='figures/belief_comparison.png', data_path='belief_comparison_data.csv', regenerate=False):
+    """
+    Plot a bar chart comparing beliefs generated by GPT and Claude
+    for the original motto and framing.
+
+    Args:
+        save_path: Path to save the plot
+        data_path: Path to save/load the data CSV
+        regenerate: If True, regenerate data even if CSV exists
+    """
+    from constants_patagonia import initial_motto, initial_product_desc
+
+    states = 4
+    actions = 3
+
+    # Check if data file exists
+    if os.path.exists(data_path) and not regenerate:
+        print(f"Loading data from {data_path}...")
+        df = pd.read_csv(data_path)
+        gpt_mean_prior = df[['gpt_mean_0', 'gpt_mean_1', 'gpt_mean_2', 'gpt_mean_3']].values[0]
+        gpt_std_prior = df[['gpt_std_0', 'gpt_std_1', 'gpt_std_2', 'gpt_std_3']].values[0]
+        claude_mean_prior = df[['claude_mean_0', 'claude_mean_1', 'claude_mean_2', 'claude_mean_3']].values[0]
+        claude_std_prior = df[['claude_std_0', 'claude_std_1', 'claude_std_2', 'claude_std_3']].values[0]
+        gpt_utility = df['gpt_utility'].values[0]
+        claude_utility = df['claude_utility'].values[0]
+    else:
+        # Create the original framing string
+        original_framing = f"BRAND_MOTTO: {initial_motto}\nPRODUCT_LINE_DESC: {initial_product_desc}"
+
+        # Generate priors using GPT (max n=8 for gpt-5.2)
+        print("Generating priors with GPT...")
+        gpt_generator = LLM_Prior_Generator(API_KEY, ORGANIZATION, "gpt-5.2", 1000, provider="openai")
+        gpt_priors, _ = gpt_generator.get_prior(buyer_desc, original_framing, num_iters=8)
+        gpt_mean_prior = np.mean(gpt_priors, axis=0)
+        gpt_std_prior = np.std(gpt_priors, axis=0)
+
+        # Generate priors using Claude
+        print("Generating priors with Claude...")
+        claude_generator = LLM_Prior_Generator(ANTHROPIC_API_KEY, ORGANIZATION, "claude-sonnet-4-20250514", 1000, provider="anthropic")
+        claude_priors, _ = claude_generator.get_prior(buyer_desc, original_framing, num_iters=8)
+        claude_mean_prior = np.mean(claude_priors, axis=0)
+        claude_std_prior = np.std(claude_priors, axis=0)
+
+        # Compute utilities for each prior
+        gpt_solver = PersuasionSolver(states, actions, sender_utility, rec_utility, true_prior, gpt_mean_prior)
+        gpt_utility, _ = gpt_solver.get_opt_signaling(verbose=False)
+
+        claude_solver = PersuasionSolver(states, actions, sender_utility, rec_utility, true_prior, claude_mean_prior)
+        claude_utility, _ = claude_solver.get_opt_signaling(verbose=False)
+
+        # Save to CSV
+        data = {
+            'gpt_mean_0': [gpt_mean_prior[0]], 'gpt_mean_1': [gpt_mean_prior[1]],
+            'gpt_mean_2': [gpt_mean_prior[2]], 'gpt_mean_3': [gpt_mean_prior[3]],
+            'gpt_std_0': [gpt_std_prior[0]], 'gpt_std_1': [gpt_std_prior[1]],
+            'gpt_std_2': [gpt_std_prior[2]], 'gpt_std_3': [gpt_std_prior[3]],
+            'claude_mean_0': [claude_mean_prior[0]], 'claude_mean_1': [claude_mean_prior[1]],
+            'claude_mean_2': [claude_mean_prior[2]], 'claude_mean_3': [claude_mean_prior[3]],
+            'claude_std_0': [claude_std_prior[0]], 'claude_std_1': [claude_std_prior[1]],
+            'claude_std_2': [claude_std_prior[2]], 'claude_std_3': [claude_std_prior[3]],
+            'gpt_utility': [gpt_utility], 'claude_utility': [claude_utility]
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(data_path, index=False)
+        print(f"Data saved to {data_path}")
+
+    # State labels
+    state_labels = [r'\textbf{Trendy' + '\n' + r'\textbf{Durable}', r'\textbf{Trendy}' + '\n' +r'\textbf{Less Durable}', r'\textbf{Not Trendy}+' + '\n' + r'\textbf{Durable}', r'\textbf{Not Trendy +}' + '\n' + r'\textbf{Less Durable}']
+    x = np.arange(len(state_labels))
+    width = 0.35
+
+    # Create the plot with two y-axes
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # Primary y-axis: probabilities (bars)
+    bars1 = ax1.bar(x - width/2, gpt_mean_prior, width, yerr=gpt_std_prior,
+                    label=r'\textbf{GPT-5.2 Prior}', color='#3498db', capsize=5)
+    bars2 = ax1.bar(x + width/2, claude_mean_prior, width, yerr=claude_std_prior,
+                    label=r'\textbf{Claude Sonnet 4 Prior}', color='#e74c3c', capsize=5)
+
+    ax1.set_ylabel(r'\textbf{Probability}')
+    ax1.set_title(r'\textbf{Belief Comparison: GPT vs Claude for Original Framing}')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(state_labels)
+    ax1.set_ylim(0, 0.8)
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels on bars
+    # for bar in bars1:
+    #     height = bar.get_height()
+    #     ax1.annotate(f'{height:.2f}',
+    #                  xy=(bar.get_x() + bar.get_width() / 2, height),
+    #                  xytext=(0, 3), textcoords="offset points",
+    #                  ha='center', va='bottom', fontsize=9)
+    # for bar in bars2:
+    #     height = bar.get_height()
+    #     ax1.annotate(f'{height:.2f}',
+    #                  xy=(bar.get_x() + bar.get_width() / 2, height),
+    #                  xytext=(0, 3), textcoords="offset points",
+    #                  ha='center', va='bottom', fontsize=9)
+
+    # Secondary y-axis: utility
+    ax2 = ax1.twinx()
+    ax2.set_ylabel(r'\textbf{Utility}', color='black')
+    ax2.tick_params(axis='y', labelcolor='black')
+
+    # Plot utility as horizontal lines or markers
+    ax2.axhline(y=gpt_utility, color='#2980b9', linestyle='--', linewidth=2,
+                label=r'\textbf{GPT Utility:} ' + f'{gpt_utility:.2f}')
+    ax2.axhline(y=claude_utility, color='#c0392b', linestyle='--', linewidth=2,
+                label=r'\textbf{Claude Utility:} ' +  f'{claude_utility:.2f}')
+    ax2.set_ylim(0, 8)
+
+    # Combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved to {save_path}")
+
+    # Print the values (bold using ANSI escape codes)
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+    print(f"\n{BOLD}GPT-4o prior:{RESET} {gpt_mean_prior} ± {gpt_std_prior}")
+    print(f"{BOLD}GPT-4o utility:{RESET} {gpt_utility:.3f}")
+    print(f"{BOLD}Claude Sonnet prior:{RESET} {claude_mean_prior} ± {claude_std_prior}")
+    print(f"{BOLD}Claude Sonnet utility:{RESET} {claude_utility:.3f}")
+
+    return gpt_mean_prior, claude_mean_prior, gpt_utility, claude_utility
+
+
 if __name__ == "__main__":
-    # columns are buy_sale, buy_reg_price, 2don't buy
-    results = search_contexts(
-        buyer_desc, sender_utility, rec_utility, true_prior,
-        num_iters=15,
-        exploration_nudge=False,  # Set True to nudge exploration when stuck
-        context_window=5          # Number of previous rounds to include in context
-    )
-    save_results_to_csv(results)
-    plot_from_csv(filename="search_results_patagonia.csv")
+    # Plot belief comparison for original framing
+    plot_belief_comparison(regenerate=True)
+
+    # # Choose provider: "openai" or "anthropic"
+    # PROVIDER = "anthropic"  # Change to "anthropic" to use Claude
+
+    # results = search_contexts(
+    #     buyer_desc, sender_utility, rec_utility, true_prior,
+    #     num_iters=15,
+    #     exploration_nudge=False,  # Set True to nudge exploration when stuck
+    #     context_window=4,         # Number of previous rounds to include in context
+    #     provider=PROVIDER,
+    #     model=None                # Uses default model for provider (gpt-4o or claude-sonnet-4-20250514)
+    # )
+    # save_results_to_csv(results)
+    # plot_from_csv(filename="search_results_patagonia.csv")
+
+    # #plot_from_csv(filename="results_patagonia_52_window_5_second.csv")
+    # results_gpt = load_results_from_csv("results_patagonia_52_window_5_second.csv")
+    # results_claude = load_results_from_csv("results_patagonia_sonnet_window_5.csv")
+    # plot_search_results(
+    #     results_gpt["total_utilities"],
+    #     results_gpt["priors"],
+    #     results_gpt["best"]["round"],
+    #     utilities_second=results_claude["total_utilities"]
+    # )

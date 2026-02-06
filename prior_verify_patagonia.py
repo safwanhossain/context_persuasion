@@ -1,4 +1,3 @@
-import openai
 import json
 import numpy as np
 import matplotlib.pyplot as plt
@@ -35,11 +34,22 @@ plt.rcParams.update({
 
 
 class LLM_Prior_Generator:
-    def __init__(self, api_key, organization, model="gpt-4o-mini", max_tokens=1000):
+    def __init__(self, api_key, organization, model="gpt-4o-mini", max_tokens=1000, provider="openai"):
+        """
+        Initialize the prior generator.
+
+        Args:
+            api_key: API key for the LLM provider
+            organization: Organization ID (OpenAI only, ignored for Anthropic)
+            model: Model name
+            max_tokens: Maximum tokens in response
+            provider: "openai" or "anthropic"
+        """
         self.api_key = api_key
         self.organization = organization
         self.model = model
         self.max_tokens = max_tokens
+        self.provider = provider
 
         # these utility values are only used for the consistency check
         self.utilities = [2, 0, 0, -1]
@@ -49,11 +59,17 @@ class LLM_Prior_Generator:
         self.prior_task_desc = prior_task_desc
         self.json_instructions = prior_json_instructions
 
-        # Initialize the OpenAI client with the API key
-        self.client = OpenAI(
-            api_key=API_KEY,
-            organization=ORGANIZATION,
-        )
+        # Initialize the appropriate client
+        if provider == "openai":
+            self.client = OpenAI(
+                api_key=api_key,
+                organization=organization,
+            )
+        elif provider == "anthropic":
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=api_key)
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
 
 
     def set_prompt_vars(self, system_prompt=None, general_desc=None, task_desc=None, consistency_desc=None):
@@ -67,7 +83,41 @@ class LLM_Prior_Generator:
             self.consistency_task_desc = consistency_desc
 
 
+    def _extract_json_from_text(self, text):
+        """Extract JSON from text, handling markdown code blocks (for Anthropic)."""
+        import re
+        # Try to find JSON in code blocks first
+        code_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+        if code_block_match:
+            try:
+                return json.loads(code_block_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+        # Try to parse the entire text as JSON
+        try:
+            return json.loads(text.strip())
+        except json.JSONDecodeError:
+            pass
+        # Try to find JSON object in text
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"Could not extract JSON from response: {text[:200]}...")
+
+
     def get_openai_response(self, system_prompt, user_prompt, num_iters=1, llm_response=None, user_prompt2=None):
+        """Get response - works with both OpenAI and Anthropic."""
+        if self.provider == "openai":
+            return self._get_openai_response_internal(system_prompt, user_prompt, num_iters, llm_response, user_prompt2)
+        else:
+            return self._get_anthropic_response_internal(system_prompt, user_prompt, num_iters, llm_response, user_prompt2)
+
+
+    def _get_openai_response_internal(self, system_prompt, user_prompt, num_iters=1, llm_response=None, user_prompt2=None):
+        """Original OpenAI implementation - unchanged."""
         messages = [
             {
                 "role": "system",
@@ -118,8 +168,45 @@ class LLM_Prior_Generator:
         except Exception as e:
             print(f"Error in get_openai_response: {e}")
             print(f"Response content: {response.choices[0].message.content if 'response' in locals() else 'No response'}")
-            # Instead of returning a string, raise the exception
             raise e
+
+
+    def _get_anthropic_response_internal(self, system_prompt, user_prompt, num_iters=1, llm_response=None, user_prompt2=None):
+        """Anthropic implementation."""
+        messages = [{"role": "user", "content": user_prompt}]
+        if llm_response and user_prompt2:
+            messages.extend([
+                {"role": "assistant", "content": llm_response},
+                {"role": "user", "content": user_prompt2}
+            ])
+
+        full_system = system_prompt + "\n\nIMPORTANT: You must respond with valid JSON only. Do not include any text outside the JSON object."
+
+        responses = []
+        for _ in range(num_iters):
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=full_system,
+                    messages=messages,
+                    top_p=1.0
+                )
+                content = response.content[0].text if response.content else ""
+                if not content.strip():
+                    print("Warning: Empty response, skipping")
+                    continue
+                try:
+                    responses.append(self._extract_json_from_text(content))
+                except ValueError as e:
+                    print(f"Warning: {e}")
+                    continue
+            except Exception as e:
+                print(f"Error in Anthropic API call: {e}")
+                continue
+
+        return responses
+
 
     def get_prior(
         self,
@@ -280,5 +367,3 @@ if __name__ == "__main__":
     )
     obj_val, scheme = solver.get_opt_signaling(verbose=False)
     print(f"The utility achieved on this prior is {obj_val}")
-
-
